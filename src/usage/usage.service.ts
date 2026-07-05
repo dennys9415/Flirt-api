@@ -11,10 +11,19 @@ import { DbService } from '../db/db.service';
 
 export type UsageKind = 'reply_generate' | 'refine';
 
+export interface UsageSummary {
+  plan: string;
+  used: number;
+  limit: number | null;
+  enforced: boolean;
+  resetsAt: string;
+}
+
 /**
  * Metering is ON from day one; plan-limit enforcement is OFF during the MVP
- * (powerful-MVP decision — see flirt-docs/COST_MODEL.md). The only active
- * ceiling is anti-abuse: absurdly high for a human, low for a bot.
+ * (powerful-MVP decision — see flirt-docs/COST_MODEL.md). The machinery below
+ * is complete so v0.3+ can flip ENFORCE_PLAN_LIMITS=true without code changes.
+ * The only always-active ceiling is anti-abuse.
  */
 @Injectable()
 export class UsageService implements OnModuleDestroy {
@@ -22,6 +31,7 @@ export class UsageService implements OnModuleDestroy {
   private readonly redis: Redis;
   private readonly abuseCeiling: number;
   private readonly enforcePlanLimits: boolean;
+  private readonly freeDailyLimit: number;
 
   constructor(
     private readonly db: DbService,
@@ -36,16 +46,20 @@ export class UsageService implements OnModuleDestroy {
     this.abuseCeiling = config.get<number>('ABUSE_MAX_REQUESTS_PER_HOUR', 100);
     this.enforcePlanLimits =
       config.get<string>('ENFORCE_PLAN_LIMITS', 'false') === 'true';
+    this.freeDailyLimit = config.get<number>('FREE_PLAN_DAILY_LIMIT', 20);
   }
 
-  /** Throws 429 only past the anti-abuse ceiling. Fails open on Redis outage. */
-  async checkAbuseCeiling(deviceId: string): Promise<void> {
+  /**
+   * Anti-abuse ceiling (always on) + plan limits (behind the flag).
+   * Fails open on Redis outage — metering must never take the product down.
+   */
+  async checkLimits(deviceId: string, plan: string): Promise<void> {
     const hourBucket = new Date().toISOString().slice(0, 13); // yyyy-mm-ddThh
-    const key = `abuse:${deviceId}:${hourBucket}`;
+    const abuseKey = `abuse:${deviceId}:${hourBucket}`;
     try {
-      const count = await this.redis.incr(key);
+      const count = await this.redis.incr(abuseKey);
       if (count === 1) {
-        await this.redis.expire(key, 3600);
+        await this.redis.expire(abuseKey, 3600);
       }
       if (count > this.abuseCeiling) {
         throw new HttpException(
@@ -53,19 +67,28 @@ export class UsageService implements OnModuleDestroy {
           HttpStatus.TOO_MANY_REQUESTS,
         );
       }
+
+      if (this.enforcePlanLimits && plan === 'free') {
+        const used = await this.usedToday(deviceId);
+        if (used >= this.freeDailyLimit) {
+          throw new HttpException(
+            {
+              error: {
+                code: 'plan_limit_reached',
+                message: 'Daily free limit reached — upgrade to keep going',
+              },
+            },
+            HttpStatus.TOO_MANY_REQUESTS,
+          );
+        }
+      }
     } catch (err) {
       if (err instanceof HttpException) throw err;
-      // Redis down must never take the product down — log and continue.
-      this.logger.warn(`Redis unavailable, skipping abuse check: ${err}`);
-    }
-
-    if (this.enforcePlanLimits) {
-      // Plan limits land in v0.3 — flag stays false during the MVP.
-      this.logger.warn('ENFORCE_PLAN_LIMITS=true but not implemented yet');
+      this.logger.warn(`Redis unavailable, skipping limit checks: ${err}`);
     }
   }
 
-  /** Durable audit trail — feeds analytics and future plan design. */
+  /** Durable audit trail + daily counter — feeds analytics and GET /usage. */
   async record(
     deviceId: string,
     userId: string | null,
@@ -77,9 +100,49 @@ export class UsageService implements OnModuleDestroy {
         [deviceId, userId, kind],
       );
     } catch (err) {
-      // Metering failure must not break the user-facing request.
       this.logger.error(`Failed to record usage event: ${err}`);
     }
+    try {
+      const key = this.dailyKey(deviceId);
+      const count = await this.redis.incr(key);
+      if (count === 1) {
+        await this.redis.expire(key, 26 * 3600);
+      }
+    } catch {
+      // Redis down — GET /usage falls back to Postgres
+    }
+  }
+
+  async summary(deviceId: string, plan: string): Promise<UsageSummary> {
+    const tomorrow = new Date();
+    tomorrow.setUTCHours(24, 0, 0, 0);
+    return {
+      plan,
+      used: await this.usedToday(deviceId),
+      limit: plan === 'free' ? this.freeDailyLimit : null,
+      enforced: this.enforcePlanLimits,
+      resetsAt: tomorrow.toISOString(),
+    };
+  }
+
+  /** Redis daily counter with a Postgres fallback. */
+  private async usedToday(deviceId: string): Promise<number> {
+    try {
+      const value = await this.redis.get(this.dailyKey(deviceId));
+      if (value !== null) return parseInt(value, 10);
+    } catch {
+      // fall through to Postgres
+    }
+    const result = await this.db.query<{ count: string }>(
+      `SELECT count(*) AS count FROM usage_events
+       WHERE device_id = $1 AND created_at >= date_trunc('day', NOW())`,
+      [deviceId],
+    );
+    return parseInt(result.rows[0]?.count ?? '0', 10);
+  }
+
+  private dailyKey(deviceId: string): string {
+    return `usage:${deviceId}:${new Date().toISOString().slice(0, 10)}`;
   }
 
   onModuleDestroy() {

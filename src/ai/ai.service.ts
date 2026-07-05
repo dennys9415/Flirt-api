@@ -6,8 +6,9 @@ import {
 } from '@nestjs/common';
 import { DbService } from '../db/db.service';
 import { UsageService } from '../usage/usage.service';
+import { UsersService } from '../users/users.service';
 import { GenerateRepliesDto, RefineDto } from './dto/generate-replies.dto';
-import { AiProvider } from './providers/ai-provider.interface';
+import { AiProvider, Suggestion } from './providers/ai-provider.interface';
 import { ModelOutputError } from './providers/parse-suggestions';
 import { AI_PROVIDER } from './providers/provider.factory';
 
@@ -21,6 +22,7 @@ export class AiService {
     @Inject(AI_PROVIDER) private readonly provider: AiProvider,
     private readonly db: DbService,
     private readonly usage: UsageService,
+    private readonly users: UsersService,
   ) {}
 
   async generateReplies(
@@ -28,7 +30,8 @@ export class AiService {
     userId: string | null,
     dto: GenerateRepliesDto,
   ) {
-    await this.usage.checkAbuseCeiling(deviceId);
+    const { plan, historyOptIn } = await this.users.flags(userId);
+    await this.usage.checkLimits(deviceId, plan);
 
     const started = Date.now();
     let result;
@@ -54,8 +57,16 @@ export class AiService {
     }
     const latencyMs = Date.now() - started;
 
-    // Metadata only — message/suggestion text stays out until history opt-in (v0.3)
-    await this.persistRequestMetadata(deviceId, userId, dto, latencyMs, result.model);
+    // Content (message + suggestions) is stored ONLY with explicit opt-in;
+    // otherwise the row keeps metadata only. See flirt-docs/DATABASE_SCHEMA.md.
+    await this.persistRequest(
+      deviceId,
+      userId,
+      dto,
+      latencyMs,
+      result.model,
+      historyOptIn ? result.suggestions : null,
+    );
     await this.usage.record(deviceId, userId, 'reply_generate');
 
     return {
@@ -68,7 +79,8 @@ export class AiService {
   }
 
   async refine(deviceId: string, userId: string | null, dto: RefineDto) {
-    await this.usage.checkAbuseCeiling(deviceId);
+    const { plan } = await this.users.flags(userId);
+    await this.usage.checkLimits(deviceId, plan);
 
     try {
       const result = await this.provider.refine({
@@ -88,23 +100,44 @@ export class AiService {
     }
   }
 
-  private async persistRequestMetadata(
+  private async persistRequest(
     deviceId: string,
     userId: string | null,
     dto: GenerateRepliesDto,
     latencyMs: number,
     model: string,
+    suggestionsForHistory: Suggestion[] | null,
   ): Promise<void> {
     try {
-      await this.db.query(
+      const request = await this.db.query<{ id: string }>(
         `INSERT INTO reply_requests
            (device_id, user_id, tone, intent, input_message, provider, model, latency_ms)
-         VALUES ($1, $2, $3, $4, NULL, $5, $6, $7)`,
-        // input_message stays NULL until history opt-in ships (v0.3)
-        [deviceId, userId, dto.tone, dto.intent, this.provider.name, model, latencyMs],
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id`,
+        [
+          deviceId,
+          userId,
+          dto.tone,
+          dto.intent,
+          suggestionsForHistory ? dto.message : null,
+          this.provider.name,
+          model,
+          latencyMs,
+        ],
       );
+
+      if (suggestionsForHistory) {
+        const requestId = request.rows[0].id;
+        for (const [index, suggestion] of suggestionsForHistory.entries()) {
+          await this.db.query(
+            `INSERT INTO reply_suggestions (request_id, text, style, position)
+             VALUES ($1, $2, $3, $4)`,
+            [requestId, suggestion.text, suggestion.style, index],
+          );
+        }
+      }
     } catch (err) {
-      this.logger.error(`Failed to persist request metadata: ${err}`);
+      this.logger.error(`Failed to persist request: ${err}`);
     }
   }
 }

@@ -2,6 +2,7 @@ import { BadGatewayException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { DbService } from '../db/db.service';
 import { UsageService } from '../usage/usage.service';
+import { UsersService } from '../users/users.service';
 import { AiService } from './ai.service';
 import { AiProvider } from './providers/ai-provider.interface';
 import { ModelOutputError } from './providers/parse-suggestions';
@@ -11,7 +12,8 @@ describe('AiService', () => {
   let service: AiService;
   let provider: jest.Mocked<AiProvider>;
   let db: { query: jest.Mock };
-  let usage: { checkAbuseCeiling: jest.Mock; record: jest.Mock };
+  let usage: { checkLimits: jest.Mock; record: jest.Mock };
+  let users: { flags: jest.Mock };
 
   beforeEach(async () => {
     provider = {
@@ -19,10 +21,15 @@ describe('AiService', () => {
       generateReplies: jest.fn(),
       refine: jest.fn(),
     };
-    db = { query: jest.fn().mockResolvedValue({ rows: [] }) };
+    db = {
+      query: jest.fn().mockResolvedValue({ rows: [{ id: 'req-1' }] }),
+    };
     usage = {
-      checkAbuseCeiling: jest.fn().mockResolvedValue(undefined),
+      checkLimits: jest.fn().mockResolvedValue(undefined),
       record: jest.fn().mockResolvedValue(undefined),
+    };
+    users = {
+      flags: jest.fn().mockResolvedValue({ plan: 'free', historyOptIn: false }),
     };
 
     const module = await Test.createTestingModule({
@@ -31,6 +38,7 @@ describe('AiService', () => {
         { provide: AI_PROVIDER, useValue: provider },
         { provide: DbService, useValue: db },
         { provide: UsageService, useValue: usage },
+        { provide: UsersService, useValue: users },
       ],
     }).compile();
 
@@ -60,15 +68,17 @@ describe('AiService', () => {
     });
   });
 
-  it('checks the abuse ceiling before generating', async () => {
-    usage.checkAbuseCeiling.mockRejectedValue(new Error('rate limited'));
+  it('checks limits (with the user plan) before generating', async () => {
+    users.flags.mockResolvedValue({ plan: 'pro', historyOptIn: false });
+    usage.checkLimits.mockRejectedValue(new Error('rate limited'));
     await expect(service.generateReplies('dev-1', null, dto)).rejects.toThrow(
       'rate limited',
     );
+    expect(usage.checkLimits).toHaveBeenCalledWith('dev-1', 'pro');
     expect(provider.generateReplies).not.toHaveBeenCalled();
   });
 
-  it('records usage and request metadata without message content', async () => {
+  it('records usage and request metadata WITHOUT content when not opted in', async () => {
     provider.generateReplies.mockResolvedValue({
       suggestions: [{ text: 'Ha!', style: 'playful' }],
       model: 'mock-1',
@@ -79,8 +89,29 @@ describe('AiService', () => {
     expect(usage.record).toHaveBeenCalledWith('dev-1', 'user-1', 'reply_generate');
     const [sql, params] = db.query.mock.calls[0];
     expect(sql).toContain('INSERT INTO reply_requests');
-    expect(sql).toContain('NULL'); // input_message never persisted in MVP
+    expect(params).toContain(null); // input_message NULL
     expect(params).not.toContain('Hey!'); // privacy: message text stays out
+    // no suggestion content rows
+    expect(db.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists message and suggestions when the user opted into history', async () => {
+    users.flags.mockResolvedValue({ plan: 'free', historyOptIn: true });
+    provider.generateReplies.mockResolvedValue({
+      suggestions: [
+        { text: 'One', style: 'playful' },
+        { text: 'Two', style: 'curious' },
+      ],
+      model: 'mock-1',
+    });
+
+    await service.generateReplies('dev-1', 'user-1', dto);
+
+    const [, requestParams] = db.query.mock.calls[0];
+    expect(requestParams).toContain('Hey!'); // opt-in: message persisted
+    // 1 request insert + 2 suggestion inserts
+    expect(db.query).toHaveBeenCalledTimes(3);
+    expect(db.query.mock.calls[1][0]).toContain('INSERT INTO reply_suggestions');
   });
 
   it('maps provider failures to a clean 502', async () => {

@@ -6,6 +6,7 @@ import { UsageService } from './usage.service';
 const redisMock = {
   incr: jest.fn(),
   expire: jest.fn(),
+  get: jest.fn(),
   disconnect: jest.fn(),
 };
 
@@ -29,17 +30,17 @@ describe('UsageService', () => {
     jest.clearAllMocks();
   });
 
-  describe('checkAbuseCeiling', () => {
+  describe('checkLimits', () => {
     it('allows requests under the ceiling', async () => {
       redisMock.incr.mockResolvedValue(5);
       const { service } = makeService();
-      await expect(service.checkAbuseCeiling('dev-1')).resolves.toBeUndefined();
+      await expect(service.checkLimits('dev-1', 'free')).resolves.toBeUndefined();
     });
 
     it('sets the TTL on the first request of the hour bucket', async () => {
       redisMock.incr.mockResolvedValue(1);
       const { service } = makeService();
-      await service.checkAbuseCeiling('dev-1');
+      await service.checkLimits('dev-1', 'free');
       expect(redisMock.expire).toHaveBeenCalledWith(
         expect.stringContaining('abuse:dev-1:'),
         3600,
@@ -49,18 +50,68 @@ describe('UsageService', () => {
     it('throws 429 past the anti-abuse ceiling', async () => {
       redisMock.incr.mockResolvedValue(101);
       const { service } = makeService({ ABUSE_MAX_REQUESTS_PER_HOUR: '100' });
-      await expect(service.checkAbuseCeiling('dev-1')).rejects.toThrow(
+      await expect(service.checkLimits('dev-1', 'free')).rejects.toThrow(
         HttpException,
       );
       await redisMock.incr.mockResolvedValue(102);
-      const error = await service.checkAbuseCeiling('dev-1').catch((e) => e);
+      const error = await service.checkLimits('dev-1', 'free').catch((e) => e);
       expect(error.getStatus()).toBe(429);
     });
 
     it('fails open when Redis is down (product must not break)', async () => {
       redisMock.incr.mockRejectedValue(new Error('ECONNREFUSED'));
       const { service } = makeService();
-      await expect(service.checkAbuseCeiling('dev-1')).resolves.toBeUndefined();
+      await expect(service.checkLimits('dev-1', 'free')).resolves.toBeUndefined();
+    });
+
+    it('does NOT enforce plan limits by default (powerful-MVP)', async () => {
+      redisMock.incr.mockResolvedValue(2);
+      redisMock.get.mockResolvedValue('9999'); // way past any plan limit
+      const { service } = makeService();
+      await expect(service.checkLimits('dev-1', 'free')).resolves.toBeUndefined();
+    });
+
+    it('enforces the free daily limit when the flag is on', async () => {
+      redisMock.incr.mockResolvedValue(2);
+      redisMock.get.mockResolvedValue('20');
+      const { service } = makeService({
+        ENFORCE_PLAN_LIMITS: 'true',
+        FREE_PLAN_DAILY_LIMIT: '20',
+      });
+      const error = await service.checkLimits('dev-1', 'free').catch((e) => e);
+      expect(error.getStatus()).toBe(429);
+      expect(JSON.stringify(error.getResponse())).toContain('plan_limit_reached');
+    });
+
+    it('never limits paid plans even with the flag on', async () => {
+      redisMock.incr.mockResolvedValue(2);
+      redisMock.get.mockResolvedValue('9999');
+      const { service } = makeService({ ENFORCE_PLAN_LIMITS: 'true' });
+      await expect(service.checkLimits('dev-1', 'pro')).resolves.toBeUndefined();
+    });
+  });
+
+  describe('summary', () => {
+    it('reports usage from the Redis daily counter', async () => {
+      redisMock.get.mockResolvedValue('7');
+      const { service } = makeService();
+      const summary = await service.summary('dev-1', 'free');
+      expect(summary).toMatchObject({
+        plan: 'free',
+        used: 7,
+        limit: 20,
+        enforced: false,
+      });
+      expect(new Date(summary.resetsAt).getTime()).toBeGreaterThan(Date.now());
+    });
+
+    it('falls back to Postgres when Redis is empty', async () => {
+      redisMock.get.mockResolvedValue(null);
+      const { service, db } = makeService();
+      db.query.mockResolvedValue({ rows: [{ count: '3' }] });
+      const summary = await service.summary('dev-1', 'pro');
+      expect(summary.used).toBe(3);
+      expect(summary.limit).toBeNull(); // paid plans are unlimited
     });
   });
 
