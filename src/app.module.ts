@@ -5,6 +5,7 @@ import { AuthModule } from './auth/auth.module';
 import { DbModule } from './db/db.module';
 import { HealthModule } from './health/health.module';
 import { HistoryModule } from './history/history.module';
+import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { UsageModule } from './usage/usage.module';
 import { UsersModule } from './users/users.module';
 
@@ -18,6 +19,7 @@ import { UsersModule } from './users/users.module';
     AiModule,
     UsageModule,
     HistoryModule,
+    SubscriptionsModule,
   ],
 })
 export class AppModule {}
