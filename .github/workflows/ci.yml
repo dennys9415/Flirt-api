@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: flirt
+          POSTGRES_PASSWORD: flirt_dev_password
+          POSTGRES_DB: flirt
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U flirt"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_HOST: localhost
+      DATABASE_PORT: "5432"
+      DATABASE_USER: flirt
+      DATABASE_PASSWORD: flirt_dev_password
+      DATABASE_NAME: flirt
+      REDIS_HOST: localhost
+      REDIS_PORT: "6379"
+      JWT_SECRET: ci-test-secret
+      AI_PROVIDER: fake
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Apply Flyway migrations (SQL, in order)
+        run: |
+          for f in $(ls migrations/V*.sql | sort -V); do
+            echo "Applying $f"
+            PGPASSWORD=flirt_dev_password psql -h localhost -U flirt -d flirt -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: E2E tests
+        run: npm run test:e2e
