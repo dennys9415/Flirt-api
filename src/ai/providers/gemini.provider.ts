@@ -1,6 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
 import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { buildRefinePrompt, buildUserPrompt, SYSTEM_PROMPT } from '../prompts';
 import {
   AiProvider,
@@ -18,11 +17,9 @@ export class GeminiProvider implements AiProvider {
   private readonly client: GoogleGenAI;
   private readonly model: string;
 
-  constructor(config: ConfigService) {
-    this.client = new GoogleGenAI({
-      apiKey: config.get<string>('GEMINI_API_KEY'),
-    });
-    this.model = config.get<string>('AI_MODEL') || 'gemini-2.0-flash';
+  constructor(apiKey: string | undefined, model?: string) {
+    this.client = new GoogleGenAI({ apiKey });
+    this.model = model || 'gemini-flash-latest';
   }
 
   async generateReplies(

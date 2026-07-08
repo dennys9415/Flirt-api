@@ -4,6 +4,7 @@ import { DbService } from '../db/db.service';
 export interface UserProfile {
   id: string;
   email: string;
+  username: string | null;
   displayName: string | null;
   plan: string;
   personality: Record<string, unknown> | null;
@@ -13,6 +14,7 @@ export interface UserProfile {
 interface UserRow {
   id: string;
   email: string;
+  username: string | null;
   display_name: string | null;
   plan: string;
   personality: Record<string, unknown> | null;
@@ -31,7 +33,7 @@ export class UsersService {
 
   async findById(userId: string): Promise<UserProfile | null> {
     const result = await this.db.query<UserRow>(
-      `SELECT id, email, display_name, plan, personality, history_opt_in
+      `SELECT id, email, username, display_name, plan, personality, history_opt_in
        FROM users WHERE id = $1`,
       [userId],
     );
@@ -74,7 +76,7 @@ export class UsersService {
          history_opt_in = COALESCE($4, history_opt_in),
          updated_at = NOW()
        WHERE id = $1
-       RETURNING id, email, display_name, plan, personality, history_opt_in`,
+       RETURNING id, email, username, display_name, plan, personality, history_opt_in`,
       [
         userId,
         input.displayName ?? null,
@@ -89,6 +91,7 @@ export class UsersService {
     return {
       id: row.id,
       email: row.email,
+      username: row.username,
       displayName: row.display_name,
       plan: row.plan,
       personality: row.personality,

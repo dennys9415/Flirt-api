@@ -1,5 +1,6 @@
 import { BadGatewayException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { AiSettingsService } from '../ai-settings/ai-settings.service';
 import { DbService } from '../db/db.service';
 import { UsageService } from '../usage/usage.service';
 import { UsersService } from '../users/users.service';
@@ -14,6 +15,7 @@ describe('AiService', () => {
   let db: { query: jest.Mock };
   let usage: { checkLimits: jest.Mock; record: jest.Mock };
   let users: { flags: jest.Mock };
+  let aiSettings: { resolve: jest.Mock };
 
   beforeEach(async () => {
     provider = {
@@ -31,6 +33,9 @@ describe('AiService', () => {
     users = {
       flags: jest.fn().mockResolvedValue({ plan: 'free', historyOptIn: false }),
     };
+    aiSettings = {
+      resolve: jest.fn().mockResolvedValue(null),
+    };
 
     const module = await Test.createTestingModule({
       providers: [
@@ -39,6 +44,7 @@ describe('AiService', () => {
         { provide: DbService, useValue: db },
         { provide: UsageService, useValue: usage },
         { provide: UsersService, useValue: users },
+        { provide: AiSettingsService, useValue: aiSettings },
       ],
     }).compile();
 
@@ -65,7 +71,23 @@ describe('AiService', () => {
       suggestions: [{ text: 'Ha!', style: 'playful' }],
       provider: 'mock',
       model: 'mock-1',
+      keySource: 'system',
     });
+  });
+
+  it('uses the user own provider when BYOK settings exist', async () => {
+    aiSettings.resolve.mockResolvedValue({
+      provider: 'fake', // resolves through createAiProvider — deterministic
+      apiKey: 'user-key',
+      model: null,
+    });
+
+    const result = await service.generateReplies('dev-1', 'user-1', dto);
+
+    expect(result.keySource).toBe('user_key');
+    expect(result.provider).toBe('fake');
+    // the injected system provider was NOT used
+    expect(provider.generateReplies).not.toHaveBeenCalled();
   });
 
   it('checks limits (with the user plan) before generating', async () => {

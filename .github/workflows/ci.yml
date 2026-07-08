@@ -41,6 +41,7 @@ jobs:
       REDIS_PORT: "6379"
       JWT_SECRET: ci-test-secret
       AI_PROVIDER: fake
+      API_KEY_ENCRYPTION_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
     steps:
       - uses: actions/checkout@v4

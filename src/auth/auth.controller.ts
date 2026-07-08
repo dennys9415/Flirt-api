@@ -7,7 +7,7 @@ import {
 import { IsString } from 'class-validator';
 import { AuthService } from './auth.service';
 import { DeviceAuthDto } from './dto/device-auth.dto';
-import { EmailAuthDto } from './dto/email-auth.dto';
+import { LoginDto, RegisterDto } from './dto/email-auth.dto';
 
 class RefreshDto {
   @IsString()
@@ -24,12 +24,12 @@ export class AuthController {
   }
 
   @Post('register')
-  async register(@Body() dto: EmailAuthDto) {
+  async register(@Body() dto: RegisterDto) {
     return this.auth.register(dto);
   }
 
   @Post('login')
-  async login(@Body() dto: EmailAuthDto) {
+  async login(@Body() dto: LoginDto) {
     return this.auth.login(dto);
   }
 

@@ -8,28 +8,60 @@ import { OpenAiProvider } from './openai.provider';
 
 export const AI_PROVIDER = Symbol('AI_PROVIDER');
 
+export const USER_SELECTABLE_PROVIDERS = [
+  'openai',
+  'anthropic',
+  'gemini',
+] as const;
+export type UserSelectableProvider =
+  (typeof USER_SELECTABLE_PROVIDERS)[number];
+
 /**
- * Config-driven provider selection (AI_PROVIDER env var).
- * Swapping vendors is a config change, never a code change — see CLAUDE.md #2.
+ * Build a provider from explicit credentials. Used for BYOK (per-user keys)
+ * and by the system factory below.
+ */
+export function createAiProvider(
+  name: string,
+  apiKey: string | undefined,
+  model?: string,
+): AiProvider {
+  switch (name.toLowerCase()) {
+    case 'openai':
+      return new OpenAiProvider(apiKey, model);
+    case 'anthropic':
+      return new AnthropicProvider(apiKey, model);
+    case 'gemini':
+      return new GeminiProvider(apiKey, model);
+    case 'fake':
+      return new FakeProvider();
+    default:
+      throw new Error(
+        `Unknown AI provider "${name}" — expected fake | openai | anthropic | gemini`,
+      );
+  }
+}
+
+/**
+ * System default provider — config-driven (AI_PROVIDER env var). Used for
+ * every request from users without their own key. See CLAUDE.md #2.
  */
 export const aiProviderFactory: Provider = {
   provide: AI_PROVIDER,
   inject: [ConfigService],
   useFactory: (config: ConfigService): AiProvider => {
     const name = config.get<string>('AI_PROVIDER', 'fake').toLowerCase();
-    switch (name) {
-      case 'openai':
-        return new OpenAiProvider(config);
-      case 'anthropic':
-        return new AnthropicProvider(config);
-      case 'gemini':
-        return new GeminiProvider(config);
-      case 'fake':
-        return new FakeProvider();
-      default:
-        throw new Error(
-          `Unknown AI_PROVIDER "${name}" — expected fake | openai | anthropic | gemini`,
-        );
+    const model = config.get<string>('AI_MODEL') || undefined;
+    const keys: Record<string, string | undefined> = {
+      openai: config.get<string>('OPENAI_API_KEY'),
+      anthropic: config.get<string>('ANTHROPIC_API_KEY'),
+      gemini: config.get<string>('GEMINI_API_KEY'),
+      fake: undefined,
+    };
+    if (!(name in keys)) {
+      throw new Error(
+        `Unknown AI_PROVIDER "${name}" — expected fake | openai | anthropic | gemini`,
+      );
     }
+    return createAiProvider(name, keys[name], model);
   },
 };

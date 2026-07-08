@@ -1,6 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { buildRefinePrompt, buildUserPrompt, SYSTEM_PROMPT } from '../prompts';
 import {
   AiProvider,
@@ -18,11 +17,9 @@ export class AnthropicProvider implements AiProvider {
   private readonly client: Anthropic;
   private readonly model: string;
 
-  constructor(config: ConfigService) {
-    this.client = new Anthropic({
-      apiKey: config.get<string>('ANTHROPIC_API_KEY'),
-    });
-    this.model = config.get<string>('AI_MODEL') || 'claude-opus-4-8';
+  constructor(apiKey: string | undefined, model?: string) {
+    this.client = new Anthropic({ apiKey });
+    this.model = model || 'claude-opus-4-8';
   }
 
   async generateReplies(

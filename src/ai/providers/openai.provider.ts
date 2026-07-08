@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { buildRefinePrompt, buildUserPrompt, SYSTEM_PROMPT } from '../prompts';
 import {
@@ -18,9 +17,9 @@ export class OpenAiProvider implements AiProvider {
   private readonly client: OpenAI;
   private readonly model: string;
 
-  constructor(config: ConfigService) {
-    this.client = new OpenAI({ apiKey: config.get<string>('OPENAI_API_KEY') });
-    this.model = config.get<string>('AI_MODEL') || 'gpt-4o-mini';
+  constructor(apiKey: string | undefined, model?: string) {
+    this.client = new OpenAI({ apiKey });
+    this.model = model || 'gpt-4o-mini';
   }
 
   async generateReplies(

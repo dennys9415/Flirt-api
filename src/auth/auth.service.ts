@@ -8,13 +8,13 @@ import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { DbService } from '../db/db.service';
 import { DeviceAuthDto } from './dto/device-auth.dto';
-import { EmailAuthDto } from './dto/email-auth.dto';
+import { LoginDto, RegisterDto } from './dto/email-auth.dto';
 
 export interface TokenPair {
   accessToken: string;
   refreshToken: string;
   deviceId: string;
-  user?: { id: string; email: string; plan: string };
+  user?: { id: string; email: string; username: string | null; plan: string };
 }
 
 export interface JwtPayload {
@@ -31,6 +31,7 @@ interface DeviceRow {
 interface UserRow {
   id: string;
   email: string;
+  username: string | null;
   plan: string;
   password_hash: string | null;
 }
@@ -57,35 +58,50 @@ export class AuthService {
     return this.issueTokens(result.rows[0]);
   }
 
-  /** Create an account and attach it to the calling device. */
-  async register(dto: EmailAuthDto): Promise<TokenPair> {
+  /** Create an account (email + optional username) linked to the device. */
+  async register(dto: RegisterDto): Promise<TokenPair> {
     const email = dto.email.toLowerCase().trim();
-    const existing = await this.db.query(
+    const username = dto.username?.toLowerCase().trim() || null;
+
+    const emailTaken = await this.db.query(
       'SELECT id FROM users WHERE email = $1',
       [email],
     );
-    if ((existing.rowCount ?? 0) > 0) {
+    if ((emailTaken.rowCount ?? 0) > 0) {
       throw new ConflictException({
         error: { code: 'email_taken', message: 'Email already registered' },
       });
     }
+    if (username) {
+      const usernameTaken = await this.db.query(
+        'SELECT id FROM users WHERE username = $1',
+        [username],
+      );
+      if ((usernameTaken.rowCount ?? 0) > 0) {
+        throw new ConflictException({
+          error: { code: 'username_taken', message: 'Username already taken' },
+        });
+      }
+    }
 
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
     const user = await this.db.query<UserRow>(
-      `INSERT INTO users (email, password_hash) VALUES ($1, $2)
-       RETURNING id, email, plan, password_hash`,
-      [email, passwordHash],
+      `INSERT INTO users (email, username, password_hash) VALUES ($1, $2, $3)
+       RETURNING id, email, username, plan, password_hash`,
+      [email, username, passwordHash],
     );
     const device = await this.linkDevice(dto.deviceIdentifier, user.rows[0].id);
     return this.issueTokens(device, user.rows[0]);
   }
 
-  /** Email/password login; links the calling device to the account. */
-  async login(dto: EmailAuthDto): Promise<TokenPair> {
-    const email = dto.email.toLowerCase().trim();
+  /** Login with email OR username; links the calling device. */
+  async login(dto: LoginDto): Promise<TokenPair> {
+    const byEmail = !!dto.email;
+    const identifier = (dto.email ?? dto.username ?? '').toLowerCase().trim();
     const result = await this.db.query<UserRow>(
-      'SELECT id, email, plan, password_hash FROM users WHERE email = $1',
-      [email],
+      `SELECT id, email, username, plan, password_hash FROM users
+       WHERE ${byEmail ? 'email' : 'username'} = $1`,
+      [identifier],
     );
     const user = result.rows[0];
     const valid =
@@ -149,7 +165,14 @@ export class AuthService {
       refreshToken,
       deviceId: device.id,
       ...(user
-        ? { user: { id: user.id, email: user.email, plan: user.plan } }
+        ? {
+            user: {
+              id: user.id,
+              email: user.email,
+              username: user.username,
+              plan: user.plan,
+            },
+          }
         : {}),
     };
   }
