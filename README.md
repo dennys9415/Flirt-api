@@ -87,3 +87,9 @@ No plan limits are enforced (`ENFORCE_PLAN_LIMITS=false`) — usage is metered
 | POST | `/auth/refresh` | none |
 | POST | `/ai/replies` | Bearer |
 | POST | `/ai/refine` | Bearer |
+
+## Contracts
+
+Payload shapes are mirrored in [`flirt-contracts`](https://github.com/dennys9415/Flirt-contracts)
+— the arbiter when API DTOs and iOS models disagree. Breaking-change rules:
+`flirt-contracts/rules/versioning.rules.md` (never break an installed app).
